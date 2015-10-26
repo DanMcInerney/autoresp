@@ -11,7 +11,6 @@ import re
 import time
 import os
 import signal
-import trollius
 import argparse
 import sys
 import subprocess
