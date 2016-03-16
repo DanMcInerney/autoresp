@@ -26,8 +26,11 @@ def parse_args():
 	#Create the arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--droneip", help="Enter the drone IP. If setting this, must also set -l arg.")
-    parser.add_argument("-l", "--localip", help="Enter the local VPN IP. If seeting this, must also set -d arg.")
+    parser.add_argument("-l", "--localip", help="Enter the local VPN IP. If setting this, must also set -d arg.")
     parser.add_argument("-c", "--crackerip", help="Enter the crackbox IP.")
+    parser.add_argument("-w", "--wordlist-path", help="Enter the wordlist path on the cracking box")
+    parser.add_argument("-x", "--hashcat-path", help="Enter the hashcat path on the cracking box")
+    parser.add_argument("-r", "--rule-path", help="Enter the hashcat rule path on the cracking box")
     return parser.parse_args()
 
 def get_dronevpn_ips(args):
@@ -118,15 +121,15 @@ def ssh_client(server, port, user, pw):
         sys.exit('[-] Authentication failed')
     return client
 
-def make_hashcat_cmd(hash_file, user):
+def make_hashcat_cmd(hash_file, wordlist_path, hashcat_path, rule_path):
     '''
     Creates the hashcat cmd to be run on the crackerbox
     '''
     ran_str = ''.join(random.choice(string.letters) for x in range(5))
-    identifier = user+'-'+ran_str
-    hashcat  = '/opt/oclHashcat-1.36/oclHashcat64.bin --session {}'.format(identifier)
+    identifier = 'autoresp-'+ran_str
+    hashcat  = '{} --session {}'.format(hashcat_path, identifier)
     hashcat += ' -m {} '
-    hashcat += '-o {} /tmp/{} /opt/wordlists/* -r /opt/oclHashcat-1.36/rules/best64.rule'.format(identifier, hash_file)
+    hashcat += '-o {} /tmp/{} {} -r {}'.format(identifier, hash_file, wordlist_path, rule_path)
     if 'NTLMv1' in hash_file:
         hashcat = hashcat.format('5500')
         screen = 'screen -S {} -dm {}'.format(identifier, hashcat)
@@ -140,7 +143,7 @@ def make_hashcat_cmd(hash_file, user):
     print '    {}'.format(screen)
     return screen, identifier
 
-def launch_cracking(d_scp, c_scp, c_user, c_ssh, unsent):
+def launch_cracking(d_scp, c_scp, c_user, c_ssh, unsent, worlist_path, hashcat_path, rule_path):
     '''
     Grab hashes off drone then put them on the crackerbox
     '''
@@ -153,7 +156,7 @@ def launch_cracking(d_scp, c_scp, c_user, c_ssh, unsent):
         # scp the hashes from the local machine to the crackerbox
         #         local path          remote path
         c_scp.put(os.getcwd()+'/'+u, '/tmp/'+u)
-        hashcat_cmd, identifier = make_hashcat_cmd(u, c_user)
+        hashcat_cmd, identifier = make_hashcat_cmd(u, wordlist_path, hashcat_path, rule_path)
 
         # Just in case hashcat_cmd is none we still want to say we sent the hash over
         # so the script doesn't continually think we haven't seen that file before
@@ -185,17 +188,20 @@ def main(args):
     if os.geteuid() != 0:
         sys.exit('[-] Run as root')
     if not args.crackerip:
-        sys.exit('[-] Use: ./autoresp.py -c <crackerbox IP address>')
+        sys.exit('[-] Use: ./autoresp.py -c <cracking box IP address> -w <wordlist path> -r <rule path> -x <hashcat bin path>')
 
     hash_files = []
     sent_hashes = []
     cracked = []
     ctrlc = False
+    hashcat_path = args.hashcat_path
+    wordlist_path = args.wordlist_path
+    rule_path = args.rule_path
 
-    raw_input('[*] Hit [Enter] when you are connected to both the drone VPN and the Coalfire network')
+    raw_input('[*] Hit [Enter] when you are connected to both the jumpbox VPN and the cracking box network')
     localip, droneip = get_dronevpn_ips(args)
     print '[*] Local IP: {}'.format(localip)
-    print '[*] Drone IP: {}'.format(droneip)
+    print '[*] Jumpbox IP: {}'.format(droneip)
 
     # Setup cracker scp
     c_user, c_pw = get_cracker_creds()
@@ -229,7 +235,7 @@ def main(args):
                     unsent = [h for h in hash_files if h not in zip(*sent_hashes)[1]]
                 else:
                     unsent = hash_files
-                sent_hashes += launch_cracking(d_scp, c_scp, c_user, c_ssh, unsent)
+                sent_hashes += launch_cracking(d_scp, c_scp, c_user, c_ssh, unsent, wordlist_path, hashcat_path, rule_path)
 
             cracked = find_cracked_hashes(c_ssh, sent_hashes, cracked)
             time.sleep(1)
